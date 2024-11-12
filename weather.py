@@ -1,137 +1,65 @@
+# Import necessary libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import statsmodels.api as sm
+import tensorflow as tf
+from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
-from math import sqrt
 
-# Set Streamlit theme
-st.set_page_config(page_title="Energy & Weather Dashboard", page_icon="⚡", layout="wide")
+# Load model and scalers
+model = tf.keras.models.load_model('path_to_your_saved_model.h5')  # Replace with your model path
+scaler_load = MinMaxScaler(feature_range=(0, 1))
+scaler_city = MinMaxScaler(feature_range=(0, 1))
+# Load scaler and city data if saved separately
+# Ensure you have your model and scalers saved correctly for deployment
 
-# Customize the style with Streamlit's theming options
-st.markdown("""
-    <style>
-        .main {
-            background-color: #f4f4f4;
-        }
-        h1, h2, h3, h4 {
-            color: #4B7BEC;
-        }
-        .stButton button {
-            background-color: #4B7BEC;
-            color: white;
-            border-radius: 8px;
-        }
-        .stFileUploader label {
-            color: #4B7BEC;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-# Title and description
-st.title("⚡ Energy Consumption and Weather Data Dashboard")
-st.write("A comprehensive dashboard to explore energy consumption and weather patterns. Upload your datasets to begin visualizing.")
-
-# Sidebar for file upload
-st.sidebar.title("Upload Data")
-st.sidebar.write("Upload energy and weather datasets in CSV format to start visualizing.")
-energy_file = st.sidebar.file_uploader("Upload Energy Dataset (CSV)", type="csv")
-weather_file = st.sidebar.file_uploader("Upload Weather Dataset (CSV)", type="csv")
-
-if energy_file and weather_file:
-    # Load energy data
-    df_energy = pd.read_csv(energy_file, parse_dates=['time'])
-    df_energy['time'] = pd.to_datetime(df_energy['time'], utc=True, infer_datetime_format=True)
-    df_energy.set_index('time', inplace=True)
-
-    # Load weather data
-    df_weather = pd.read_csv(weather_file, parse_dates=['dt_iso'])
-    df_weather['time'] = pd.to_datetime(df_weather['dt_iso'], utc=True, infer_datetime_format=True)
-    df_weather.drop(['dt_iso'], axis=1, inplace=True)
-    df_weather.set_index('time', inplace=True)
-
-    # Display data preview
-    st.header("📊 Data Previews")
-    col1, col2 = st.columns(2)
+# Function for load forecasting
+def predict_future_load(input_date, city_name):
+    input_date = pd.to_datetime(input_date)
+    city_name = city_name.strip().lower()
     
-    with col1:
-        st.subheader("Energy Dataset")
-        st.write(df_energy.head())
+    # Ensure valid city name
+    if city_name not in city_encoded.columns:
+        raise ValueError("City name not found. Available cities: {}".format(', '.join(city_encoded.columns)))
+
+    future_sequence = scaled_data[-sequence_length:, :].copy()
+    city_feature_index = list(city_encoded.columns).index(city_name)
+    city_feature_values = np.zeros(len(city_encoded.columns))
+    city_feature_values[city_feature_index] = 1
+    city_feature_values_scaled = scaler_city.transform(pd.DataFrame([city_feature_values], columns=city_encoded.columns))
     
-    with col2:
-        st.subheader("Weather Dataset")
-        st.write(df_weather.head())
+    days_to_predict = (input_date - energy_data.index[-1]).days
+    if days_to_predict <= 0:
+        raise ValueError("Input date must be in the future.")
 
-    # Data cleaning - Drop unnecessary columns
-    df_energy = df_energy.drop(['generation fossil coal-derived gas', 'generation fossil oil shale',
-                                'generation fossil peat', 'generation geothermal',
-                                'generation hydro pumped storage aggregated', 'generation marine',
-                                'generation wind offshore', 'forecast wind offshore eday ahead',
-                                'total load forecast', 'forecast solar day ahead',
-                                'forecast wind onshore day ahead'], axis=1)
+    for _ in range(days_to_predict):
+        predicted_scaled = model.predict(future_sequence.reshape(1, sequence_length, -1))
+        city_feature_values_scaled = np.tile(city_feature_values_scaled, (predicted_scaled.shape[0], 1))
+        new_step = np.hstack((predicted_scaled, city_feature_values_scaled))
+        future_sequence = np.vstack((future_sequence[1:], new_step))
 
-    # Line plot of Actual Total Load for the first 2 weeks
-    st.header("🔋 Energy Load Analysis")
-    st.subheader("Actual Total Load (First 2 Weeks - Original)")
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(df_energy['total load actual'].iloc[:24 * 7 * 2], color='#4B7BEC')
-    ax.set_title("Actual Total Load (First 2 Weeks)", fontsize=16)
-    ax.set_xlabel("Time", fontsize=12)
-    ax.set_ylabel("Total Load (MWh)", fontsize=12)
-    st.pyplot(fig)
+    predicted_load = scaler_load.inverse_transform(predicted_scaled.reshape(-1, 1))
+    return predicted_load[0, 0]
 
-    # Handling missing values
-    st.header("🛠️ Data Cleaning")
-    st.subheader("Handling Missing Values")
-    missing_values_before = df_energy.isnull().sum().sum()
-    st.write(f"Number of missing values before interpolation: {missing_values_before}")
+# Streamlit UI
+st.title("Smart Grid Load Forecasting")
 
-    df_energy.interpolate(method='linear', limit_direction='forward', inplace=True, axis=0)
-    missing_values_after = df_energy.isnull().sum().sum()
-    st.write(f"Number of missing values after interpolation: {missing_values_after}")
+# Input Section
+st.sidebar.header("Enter Details")
+input_date = st.sidebar.date_input("Select a future date")
+city_name = st.sidebar.selectbox("Select City", city_encoded.columns)
 
-    # Correlation Heatmap
-    st.header("🌡️ Correlation Heatmap")
-    correlations = df_energy.corr()
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sns.heatmap(correlations, annot=True, cmap='coolwarm', ax=ax)
-    st.pyplot(fig)
+# Prediction Button
+if st.sidebar.button("Predict Load"):
+    try:
+        # Call prediction function
+        future_load = predict_future_load(input_date, city_name)
+        st.subheader(f"Predicted Load for {city_name.capitalize()} on {input_date}:")
+        st.write(f"{future_load:.2f} MW")
+    except ValueError as e:
+        st.error(e)
 
-    # Feature Engineering: Hour, Weekday, Month
-    st.header("⚙️ Feature Engineering")
-    df_energy['hour'] = df_energy.index.hour
-    df_energy['weekday'] = df_energy.index.weekday
-    df_energy['month'] = df_energy.index.month
-    st.write("New features (`hour`, `weekday`, `month`) added to the energy dataset:")
-    st.write(df_energy.head())
-
-    # Data Scaling
-    st.header("📏 Data Scaling")
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(df_energy[['total load actual']])
-    st.write("Scaled `total load actual` data:")
-    st.write(scaled_data[:10])
-
-    # Decomposition of Electricity Price
-    st.header("📉 Seasonal Decomposition")
-    res = sm.tsa.seasonal_decompose(df_energy['price actual'], model='additive', period=24)
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 12))
-    res.observed.plot(ax=ax1, title='Observed')
-    res.trend.plot(ax=ax2, title='Trend')
-    res.seasonal.plot(ax=ax3, title='Seasonal')
-    res.resid.plot(ax=ax4, title='Residual')
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    # RMSE Calculation Example
-    st.header("📊 RMSE Calculation")
-    y_true = df_energy['price actual'].iloc[:100]
-    y_pred = y_true + np.random.normal(0, 0.05, size=len(y_true))  # Dummy prediction for illustration
-    rmse = sqrt(mean_squared_error(y_true, y_pred))
-    st.write(f"Calculated RMSE: {rmse:.3f}")
-
-else:
-    st.warning("Please upload both the Energy and Weather datasets to proceed.")
+# Display R-squared Accuracy
+r2 = r2_score(y_test_rescaled, y_pred_rescaled)
+accuracy_percentage = r2 * 100
+st.sidebar.write(f'Accuracy (R-squared): {accuracy_percentage:.2f}%')
